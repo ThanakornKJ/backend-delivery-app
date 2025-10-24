@@ -522,6 +522,23 @@ app.put(
     }
   }
 );
+// GET rider profile by id
+app.get("/api/riders/:id", auth(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid rider ID" });
+    }
+
+    const rider = await Rider.findById(id);
+    if (!rider) return res.status(404).json({ error: "Rider not found" });
+
+    res.json(rider.toPublic());
+  } catch (err) {
+    console.error("get rider profile error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 /* -------------------- Addresses -------------------- */
 app.post("/api/addresses", auth(), async (req, res) => {
