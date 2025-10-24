@@ -587,6 +587,23 @@ app.delete("/api/addresses/:id", auth(), async (req, res) => {
 });
 
 /* -------------------- Deliveries -------------------- */
+// helper function populate delivery
+async function populateDelivery(deliveryId) {
+  return Delivery.findById(deliveryId).populate([
+    {
+      path: "sender",
+      select: "name phone_number profile_image latitude longitude",
+    },
+    {
+      path: "receiver",
+      select: "name phone_number profile_image latitude longitude",
+    },
+    { path: "rider", select: "name phone_number profile_image current_latitude current_longitude" },
+    { path: "pickup_address" },
+    { path: "dropoff_address" },
+  ]);
+}
+
 // POST /api/deliveries
 app.post("/api/deliveries", auth(), async (req, res) => {
   try {
@@ -595,13 +612,11 @@ app.post("/api/deliveries", auth(), async (req, res) => {
     // --- Lookup sender ---
     let senderUser;
     if (!sender) {
-      // ใช้ user ที่ login มา
       if (req.user.role !== "user") return res.status(403).json({ error: "Only user can create delivery" });
       senderUser = await User.findById(req.user.id);
       if (!senderUser) return res.status(404).json({ error: "Sender not found" });
       sender = senderUser._id;
     } else if (/^\d+$/.test(String(sender))) {
-      // ถ้า sender เป็นเบอร์โทร
       senderUser = await User.findOne({ phone_number: String(sender).replace(/\D/g, "") });
       if (!senderUser) return res.status(404).json({ error: "Sender not found by phone" });
       sender = senderUser._id;
@@ -619,6 +634,25 @@ app.post("/api/deliveries", auth(), async (req, res) => {
     // --- Validate dropoff_address ---
     if (!dropoff_address) return res.status(400).json({ error: "Dropoff address required" });
 
+    // --- ดึงพิกัดผู้ส่งจาก pickup_address หรือ address หลัก ---
+    let senderLatitude = senderUser.latitude;
+    let senderLongitude = senderUser.longitude;
+
+    if (pickup_address) {
+      const pickupAddr = await Address.findById(pickup_address);
+      if (pickupAddr && pickupAddr.latitude != null && pickupAddr.longitude != null) {
+        senderLatitude = pickupAddr.latitude;
+        senderLongitude = pickupAddr.longitude;
+      }
+    } else {
+      const addresses = await Address.find({ userId: senderUser._id });
+      if (addresses.length > 0) {
+        senderLatitude = addresses[0].latitude;
+        senderLongitude = addresses[0].longitude;
+        pickup_address = addresses[0]._id; // ตั้งเป็น pickup_address อัตโนมัติ
+      }
+    }
+
     // --- สร้าง Delivery ---
     const delivery = new Delivery({
       sender,
@@ -633,10 +667,7 @@ app.post("/api/deliveries", auth(), async (req, res) => {
 
     await delivery.save();
 
-    // Populate สำหรับ response
-    const populatedDelivery = await Delivery.findById(delivery._id)
-      .populate("sender receiver rider pickup_address dropoff_address");
-
+    const populatedDelivery = await populateDelivery(delivery._id);
     res.status(201).json(populatedDelivery);
   } catch (err) {
     console.error("create delivery error:", err);
@@ -644,37 +675,36 @@ app.post("/api/deliveries", auth(), async (req, res) => {
   }
 });
 
-app.get("/api/deliveries/user/:userId", auth(), async (req, res) => {
-  try {
-    const userId = req.params.userId;
-    if (!mongoose.Types.ObjectId.isValid(userId)) {
-      return res.status(400).json({ error: "Invalid userId" });
-    }
-    const deliveries = await Delivery.find({
-      $or: [{ sender: userId }, { receiver: userId }],
-    }).populate("sender receiver rider pickup_address dropoff_address");
-
-    res.json(deliveries);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
+// GET /api/deliveries
 app.get("/api/deliveries", auth(), async (req, res) => {
-  const deliveries = await Delivery.find().populate(
-    "sender receiver rider pickup_address dropoff_address"
-  );
-  res.json(deliveries);
+  const deliveries = await Delivery.find();
+  const populated = await Promise.all(deliveries.map(d => populateDelivery(d._id)));
+  res.json(populated);
 });
 
+// GET /api/deliveries/:id
 app.get("/api/deliveries/:id", auth(), async (req, res) => {
-  const delivery = await Delivery.findById(req.params.id).populate(
-    "sender receiver rider pickup_address dropoff_address"
-  );
+  const delivery = await populateDelivery(req.params.id);
   if (!delivery) return res.status(404).json({ error: "Delivery not found" });
   res.json(delivery);
 });
+
+// GET /api/deliveries/user/:userId
+app.get("/api/deliveries/user/:userId", auth(), async (req, res) => {
+  const userId = req.params.userId;
+  if (!mongoose.Types.ObjectId.isValid(userId)) return res.status(400).json({ error: "Invalid userId" });
+  const deliveries = await Delivery.find({ $or: [{ sender: userId }, { receiver: userId }] });
+  const populated = await Promise.all(deliveries.map(d => populateDelivery(d._id)));
+  res.json(populated);
+});
+
+// GET /api/deliveries/waiting
+app.get("/api/deliveries/waiting", auth("rider"), async (req, res) => {
+  const deliveries = await Delivery.find({ rider: null });
+  const populated = await Promise.all(deliveries.map(d => populateDelivery(d._id)));
+  res.json(populated);
+});
+
 
 /* -------------------- Assign delivery to rider -------------------- */
 // PATCH /api/deliveries/:id/assign
